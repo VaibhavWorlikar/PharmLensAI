@@ -1,67 +1,61 @@
-import streamlit as st 
-import numpy as np 
-import pandas as pd 
-from PIL import Image 
+import streamlit as st
+import numpy as np
+import pandas as pd
+from PIL import Image
 import tensorflow as tf
 
-import os
-import gdown
-# Optional: Define the custom metric if required by the model
-def top_5_accuracy(y_true, y_pred): 
-    return 0.81
-model_path = "pill_classifier_savedmodel.keras"
-if not os.path.exists(model_path):
-    # Replace with your actual file ID
-    file_id = "1PIYCdVH4DqCNbEeCsM1ZA5XIYVlHPTz0"
-    url = f"https://drive.google.com/file/d/1PIYCdVH4DqCNbEeCsM1ZA5XIYVlHPTz0/view?usp=drive_link"
-    gdown.download(url, model_path, quiet=False)
+# Load CSV with pill info
+pill_data = pd.read_csv("extracted_sentences.csv")
+pill_data.columns = pill_data.columns.str.strip()
+class_names = pill_data['Class_Name'].tolist()
 
-# Load your model
-from tensorflow.keras.models import load_model
-model = load_model(model_path, custom_objects={"top_5_accuracy": top_5_accuracy})
+# Load TFLite model
+interpreter = tf.lite.Interpreter(model_path="pill_classifier_final.tflite")
+interpreter.allocate_tensors()
 
+# Get input and output tensors.
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
+def preprocess_image(image, target_size=(224, 224)):
+    image = image.convert("RGB")
+    image = image.resize(target_size)
+    img_array = np.array(image, dtype=np.float32) / 255.0
+    return np.expand_dims(img_array, axis=0)
 
-# Load model with custom metric if needed
-model = tf.keras.models.load_model("pill_classifier_savedmodel.keras", custom_objects={"top_5_accuracy": top_5_accuracy})
+def predict_tflite(image):
+    input_data = preprocess_image(image)
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])[0]
 
-# Load CSV data
-pill_data = pd.read_csv("extracted_sentences.csv")  # Make sure this matches your file name
-pill_data.columns = pill_data.columns.str.strip()  # Remove leading/trailing spaces from headers
+    top_idx = np.argmax(output_data)
+    confidence = output_data[top_idx]
+    top_5_idx = np.argsort(output_data)[-5:][::-1]
+    top_5_predictions = [(class_names[i], output_data[i]) for i in top_5_idx]
 
-# Get all class names (used for index-to-name mapping)
-class_names = pill_data['Class_Name'].tolist()  # ✅ correct
-
-# Image preprocessing
-def preprocess_image(image, target_size=(224, 224)): 
-    image = image.convert("RGB") 
-    image = image.resize(target_size) 
-    img_array = np.array(image) / 255.0 
-    return np.expand_dims(img_array, axis=0) 
+    return class_names[top_idx], confidence, top_5_predictions
 
 # Streamlit UI
-st.title("💊 Pill Classifier")
-st.write("Upload an image of a pill to identify it and learn about its usage.")
+st.title("💊 PharmLensAI Pill Classifier ")
+st.write("Upload a pill image to identify it and learn about its use.")
 
 uploaded_file = st.file_uploader("Choose a pill image", type=["jpg", "jpeg", "png"])
 
-if uploaded_file: 
+if uploaded_file:
     image = Image.open(uploaded_file)
     st.image(image, caption="Uploaded Image", use_column_width=True)
 
-    input_image = preprocess_image(image)
-    preds = model.predict(input_image)[0]
-
-    top_index = np.argmax(preds)
-    pred_class = class_names[top_index]
-    confidence = preds[top_index]
-
-    # Fetch pill info from the CSV
+    pred_class, confidence, top5 = predict_tflite(image)
     pill_info = pill_data[pill_data['Class_Name'] == pred_class].iloc[0]
 
     st.subheader("🧠 Prediction")
     st.write(f"**Predicted Class:** {pred_class}")
-    st.write(f"**Confidence:** {confidence * 100:.2f}%")
+    st.write(f"**Confidence:** {confidence*100:.2f}%")
     st.write(f"**Name:** {pill_info['Name_EN']}")
     st.write(f"**Description:** {pill_info['Description_EN']}")
     st.write(f"**Usage:** {pill_info['Usage']}")
+
+    st.markdown("### 🔝 Top 5 Predictions:")
+    for name, prob in top5:
+        st.write(f"- {name}: {prob*100:.2f}%")
